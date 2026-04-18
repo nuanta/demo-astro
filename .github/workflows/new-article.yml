@@ -1,0 +1,104 @@
+name: Nuanta Webhook Publisher
+
+on:
+  repository_dispatch:
+    types: [article_published]
+
+permissions:
+  contents: write
+
+jobs:
+  generate-post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+      - name: Create Article and Download Image
+        env:
+          ARTICLE_TITLE: ${{ github.event.client_payload.title }}
+          ARTICLE_SLUG: ${{ github.event.client_payload.slug }}
+          ARTICLE_CONTENT: ${{ github.event.client_payload.markdown }}
+          IMAGE_URL: ${{ github.event.client_payload.cover_image_url }}
+          PUBLISHED_AT: ${{ github.event.client_payload.publishedAt }}
+          META_DESCRIPTION: ${{ github.event.client_payload.excerpt }}
+          META_KEYWORDS: ${{ github.event.client_payload.tags }}
+
+        run: |
+          mkdir -p src/content/blog
+          mkdir -p public/blog-images
+          
+          # Ensure a fallback date if payload doesn't provide one
+          if [ -z "$PUBLISHED_AT" ]; then
+            PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          fi
+          
+          # Extract formatting for filenames
+          FORMATTED_DATE=$(date -u -d "$PUBLISHED_AT" +"%Y-%m-%d_%H-%M-%S")
+          ARTICLE_FILE_NAME="${FORMATTED_DATE}-${ARTICLE_SLUG}"
+           
+          if [ -z "$ARTICLE_SLUG" ]; then
+            echo "Error: Slug is empty."
+            exit 1
+          fi
+          
+          IMAGE_PATH_IN_MARKDOWN=""
+          if [ -n "$IMAGE_URL" ]; then
+            EXT="${IMAGE_URL##*.}"
+            # Fallback extension if none found
+            if [ "$EXT" == "$IMAGE_URL" ]; then EXT="jpg"; fi
+            
+            IMAGE_FILENAME="${ARTICLE_FILE_NAME}.${EXT}"
+            LOCAL_IMAGE_PATH="public/blog-images/$IMAGE_FILENAME"
+          
+            echo "Downloading image from $IMAGE_URL to $LOCAL_IMAGE_PATH"
+            curl -L -o "$LOCAL_IMAGE_PATH" "$IMAGE_URL"
+          
+            # Astro uses public root (/) for serving images
+            IMAGE_PATH_IN_MARKDOWN="/blog-images/$IMAGE_FILENAME"
+          fi
+          
+          MD_FILE_PATH="src/content/blog/${ARTICLE_FILE_NAME}.md"
+
+          cat > "$MD_FILE_PATH" <<EOF
+          ---
+          title: "$ARTICLE_TITLE"
+          ${IMAGE_PATH_IN_MARKDOWN:+image: "$IMAGE_PATH_IN_MARKDOWN"}
+          slug: "$ARTICLE_SLUG"
+          publishDate: "$PUBLISHED_AT"
+          description: "$META_DESCRIPTION"
+          tags: "$META_KEYWORDS"
+          ---
+
+          $ARTICLE_CONTENT
+          EOF
+          
+          echo "Markdown file created at $MD_FILE_PATH"
+
+      - name: Commit and Push new files
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git add src/content/blog/*.md
+          
+          if [ -d "public/blog-images" ] && [ "$(ls -A public/blog-images)" ]; then
+             git add public/blog-images/*
+          fi
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          
+          git commit -m "feat(content): Publish new article - ${ARTICLE_TITLE}"
+          
+          # Rebase to avoid merge commits from parallel changes
+          git pull --rebase origin main
+          
+          # Push your changes
+          git push origin main
